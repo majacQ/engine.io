@@ -374,6 +374,31 @@ describe("server", () => {
       });
     });
 
+    it("should disallow connection that are rejected by `generateId` (websocket only)", done => {
+      const partialDone = createPartialDone(done, 2);
+
+      engine = listen({ allowUpgrades: false }, port => {
+        engine.generateId = () => {
+          return Promise.reject(new Error("nope"));
+        };
+
+        engine.on("connection_error", err => {
+          expect(err.req).to.be.an(http.IncomingMessage);
+          expect(err.code).to.be(3);
+          expect(err.message).to.be("Bad request");
+          expect(err.context.name).to.be("ID_GENERATION_ERROR");
+          partialDone();
+        });
+
+        const socket = new eioc.Socket("ws://localhost:%d".s(port), {
+          transports: ["websocket"]
+        });
+        socket.on("error", () => {
+          partialDone();
+        });
+      });
+    });
+
     it("should exchange handshake data", done => {
       listen({ allowUpgrades: false }, port => {
         const socket = new eioc.Socket("ws://localhost:%d".s(port));
