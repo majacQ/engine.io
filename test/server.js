@@ -374,7 +374,10 @@ describe("server", () => {
       });
     });
 
-    it("should disallow connection that are rejected by `generateId` (websocket only)", done => {
+    it("should disallow connection that are rejected by `generateId` (websocket only)", function (done) {
+      if (process.env.EIO_WS_ENGINE === "eiows") {
+        this.skip();
+      }
       const partialDone = createPartialDone(done, 2);
 
       engine = listen({ allowUpgrades: false }, port => {
