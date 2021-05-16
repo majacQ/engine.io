@@ -374,7 +374,7 @@ describe("server", () => {
       });
     });
 
-    it("should disallow connection that are rejected by `generateId` (websocket only)", function (done) {
+    it("should disallow connection that are rejected by `generateId` (websocket only)", function(done) {
       if (process.env.EIO_WS_ENGINE === "eiows") {
         this.skip();
       }
