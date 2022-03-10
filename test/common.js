@@ -1,5 +1,6 @@
-const eio = require("..");
-const eioc =
+const { listen, uServer } = require("..");
+const { App, us_socket_local_port } = require("uWebSockets.js");
+const { Socket } =
   process.env.EIO_CLIENT === "3"
     ? require("engine.io-client-v3")
     : require("engine.io-client");
@@ -16,24 +17,33 @@ exports.listen = (opts, fn) => {
 
   opts.allowEIO3 = true;
 
-  if (process.env.EIO_WS_ENGINE) {
-    opts.wsEngine = require(process.env.EIO_WS_ENGINE).Server;
+  if (process.env.EIO_WS_ENGINE === "uws") {
+    const engine = new uServer(opts);
+    const app = App();
+    engine.attach(app, opts);
+
+    app.listen(0, listenSocket => {
+      const port = us_socket_local_port(listenSocket);
+      process.nextTick(() => {
+        fn(port);
+      });
+    });
+
+    return engine;
   }
 
-  const e = eio.listen(0, opts, () => {
+  if (process.env.EIO_WS_ENGINE === "eiows") {
+    opts.wsEngine = require("eiows").Server;
+  }
+
+  const e = listen(0, opts, () => {
     fn(e.httpServer.address().port);
   });
 
   return e;
 };
 
-exports.eioc = eioc;
-
-/**
- * Sprintf util.
- */
-
-require("s").extend();
+exports.ClientSocket = Socket;
 
 exports.createPartialDone = (done, count) => {
   let i = 0;

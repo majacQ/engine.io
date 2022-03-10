@@ -1,14 +1,27 @@
-const Transport = require("../transport");
-const zlib = require("zlib");
-const accepts = require("accepts");
-const debug = require("debug")("engine:polling");
+import { Transport } from "../transport";
+import { createGzip, createDeflate } from "zlib";
+import * as accepts from "accepts";
+import debugModule from "debug";
+import { HttpRequest, HttpResponse } from "uWebSockets.js";
+
+const debug = debugModule("engine:polling");
 
 const compressionMethods = {
-  gzip: zlib.createGzip,
-  deflate: zlib.createDeflate
+  gzip: createGzip,
+  deflate: createDeflate
 };
 
-class Polling extends Transport {
+export class Polling extends Transport {
+  public maxHttpBufferSize: number;
+  public httpCompression: any;
+
+  private res: HttpResponse;
+  private dataReq: HttpRequest;
+  private dataRes: HttpResponse;
+  private shouldClose: Function;
+
+  private readonly closeTimeout: number;
+
   /**
    * HTTP polling constructor.
    *
@@ -18,8 +31,6 @@ class Polling extends Transport {
     super(req);
 
     this.closeTimeout = 30 * 1000;
-    this.maxHttpBufferSize = null;
-    this.httpCompression = null;
   }
 
   /**
@@ -31,21 +42,26 @@ class Polling extends Transport {
     return "polling";
   }
 
+  get supportsFraming() {
+    return false;
+  }
+
   /**
    * Overrides onRequest.
    *
-   * @param {http.IncomingMessage}
+   * @param req
+   *
    * @api private
    */
   onRequest(req) {
     const res = req.res;
 
-    if ("GET" === req.method) {
+    if (req.getMethod() === "get") {
       this.onPollRequest(req, res);
-    } else if ("POST" === req.method) {
+    } else if (req.getMethod() === "post") {
       this.onDataRequest(req, res);
     } else {
-      res.writeHead(500);
+      res.writeStatus("500 Internal Server Error");
       res.end();
     }
   }
@@ -60,7 +76,7 @@ class Polling extends Transport {
       debug("request overlap");
       // assert: this.res, '.req and .res should be (un)set together'
       this.onError("overlap from client");
-      res.writeHead(500);
+      res.writeStatus("500 Internal Server Error");
       res.end();
       return;
     }
@@ -71,16 +87,16 @@ class Polling extends Transport {
     this.res = res;
 
     const onClose = () => {
+      this.writable = false;
       this.onError("poll connection closed prematurely");
     };
 
     const cleanup = () => {
-      req.removeListener("close", onClose);
       this.req = this.res = null;
     };
 
     req.cleanup = cleanup;
-    req.on("close", onClose);
+    res.onAborted(onClose);
 
     this.writable = true;
     this.emit("drain");
@@ -101,8 +117,22 @@ class Polling extends Transport {
     if (this.dataReq) {
       // assert: this.dataRes, '.dataReq and .dataRes should be (un)set together'
       this.onError("data request overlap from client");
-      res.writeHead(500);
+      res.writeStatus("500 Internal Server Error");
       res.end();
+      return;
+    }
+
+    const expectedContentLength = Number(req.headers["content-length"]);
+
+    if (!expectedContentLength) {
+      this.onError("content-length header required");
+      res.writeStatus("411 Length Required").end();
+      return;
+    }
+
+    if (expectedContentLength > this.maxHttpBufferSize) {
+      this.onError("payload too large");
+      res.writeStatus("413 Payload Too Large").end();
       return;
     }
 
@@ -115,55 +145,71 @@ class Polling extends Transport {
     this.dataReq = req;
     this.dataRes = res;
 
-    let chunks = isBinary ? Buffer.concat([]) : "";
+    let buffer;
+    let offset = 0;
 
-    const cleanup = () => {
-      req.removeListener("data", onData);
-      req.removeListener("end", onEnd);
-      req.removeListener("close", onClose);
-      this.dataReq = this.dataRes = chunks = null;
+    const headers = {
+      // text/html is required instead of text/plain to avoid an
+      // unwanted download dialog on certain user-agents (GH-43)
+      "Content-Type": "text/html"
     };
 
-    const onClose = () => {
-      cleanup();
-      this.onError("data request connection closed prematurely");
-    };
+    this.headers(req, headers);
+    for (let key in headers) {
+      res.writeHeader(key, String(headers[key]));
+    }
 
-    const onData = data => {
-      let contentLength;
-      if (isBinary) {
-        chunks = Buffer.concat([chunks, data]);
-        contentLength = chunks.length;
-      } else {
-        chunks += data;
-        contentLength = Buffer.byteLength(chunks);
-      }
-
-      if (contentLength > this.maxHttpBufferSize) {
-        chunks = isBinary ? Buffer.concat([]) : "";
-        req.connection.destroy();
-      }
-    };
-
-    const onEnd = () => {
-      this.onData(chunks);
-
-      const headers = {
-        // text/html is required instead of text/plain to avoid an
-        // unwanted download dialog on certain user-agents (GH-43)
-        "Content-Type": "text/html",
-        "Content-Length": 2
-      };
-
-      res.writeHead(200, this.headers(req, headers));
+    const onEnd = buffer => {
+      this.onData(buffer.toString());
+      this.onDataRequestCleanup();
       res.end("ok");
-      cleanup();
     };
 
-    req.on("close", onClose);
-    if (!isBinary) req.setEncoding("utf8");
-    req.on("data", onData);
-    req.on("end", onEnd);
+    res.onAborted(() => {
+      this.onDataRequestCleanup();
+      this.onError("data request connection closed prematurely");
+    });
+
+    res.onData((arrayBuffer, isLast) => {
+      const totalLength = offset + arrayBuffer.byteLength;
+      if (totalLength > expectedContentLength) {
+        this.onError("content-length mismatch");
+        res.close(); // calls onAborted
+        return;
+      }
+
+      if (!buffer) {
+        if (isLast) {
+          onEnd(Buffer.from(arrayBuffer));
+          return;
+        }
+        buffer = Buffer.allocUnsafe(expectedContentLength);
+      }
+
+      Buffer.from(arrayBuffer).copy(buffer, offset);
+
+      if (isLast) {
+        if (totalLength != expectedContentLength) {
+          this.onError("content-length mismatch");
+          res.writeStatus("400 Content-Length Mismatch").end();
+          this.onDataRequestCleanup();
+          return;
+        }
+        onEnd(buffer);
+        return;
+      }
+
+      offset = totalLength;
+    });
+  }
+
+  /**
+   * Cleanup request.
+   *
+   * @api private
+   */
+  private onDataRequestCleanup() {
+    this.dataReq = this.dataRes = null;
   }
 
   /**
@@ -265,9 +311,10 @@ class Polling extends Transport {
     };
 
     const respond = data => {
-      headers["Content-Length"] =
-        "string" === typeof data ? Buffer.byteLength(data) : data.length;
-      this.res.writeHead(200, this.headers(this.req, headers));
+      this.headers(this.req, headers);
+      Object.keys(headers).forEach(key => {
+        this.res.writeHeader(key, String(headers[key]));
+      });
       this.res.end(data);
       callback();
     };
@@ -291,7 +338,7 @@ class Polling extends Transport {
 
     this.compress(data, encoding, (err, data) => {
       if (err) {
-        this.res.writeHead(500);
+        this.res.writeStatus("500 Internal Server Error");
         this.res.end();
         callback(err);
         return;
@@ -335,11 +382,6 @@ class Polling extends Transport {
 
     let closeTimeoutTimer;
 
-    if (this.dataReq) {
-      debug("aborting ongoing data request");
-      this.dataReq.destroy();
-    }
-
     const onClose = () => {
       clearTimeout(closeTimeoutTimer);
       fn();
@@ -363,7 +405,7 @@ class Polling extends Transport {
   /**
    * Returns headers for a response.
    *
-   * @param {http.IncomingMessage} request
+   * @param req - request
    * @param {Object} extra headers
    * @api private
    */
@@ -381,5 +423,3 @@ class Polling extends Transport {
     return headers;
   }
 }
-
-module.exports = Polling;

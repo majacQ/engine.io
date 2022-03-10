@@ -1,3 +1,108 @@
+## [6.1.3](https://github.com/socketio/engine.io/compare/6.1.2...6.1.3) (2022-02-23)
+
+
+### Bug Fixes
+
+* **typings:** allow CorsOptionsDelegate as cors options ([#641](https://github.com/socketio/engine.io/issues/641)) ([a463d26](https://github.com/socketio/engine.io/commit/a463d268ed90064e7863679bda423951de108c36))
+* **uws:** properly handle chunked content ([#642](https://github.com/socketio/engine.io/issues/642)) ([3367440](https://github.com/socketio/engine.io/commit/33674403084c329dc6ad026c4122333a6f8a9992))
+
+
+
+## [6.1.2](https://github.com/socketio/engine.io/compare/6.1.1...6.1.2) (2022-01-18)
+
+
+### Bug Fixes
+
+* **uws:** expose additional uWebSockets.js options ([#634](https://github.com/socketio/engine.io/issues/634)) ([49bb7cf](https://github.com/socketio/engine.io/commit/49bb7cf66518d4b49baf883a16ee1fe1ed8aed28))
+* **uws:** fix HTTP long-polling with CORS ([45112a3](https://github.com/socketio/engine.io/commit/45112a30d1af4cc25b21a5d658a748583cb64ed4))
+* **uws:** handle invalid websocket upgrades ([8b4d6a8](https://github.com/socketio/engine.io/commit/8b4d6a8176db72f5c2420c5a45f0d97d33af049b))
+
+
+
+## [6.1.1](https://github.com/socketio/engine.io/compare/6.1.0...6.1.1) (2022-01-11)
+
+:warning: This release contains an important security fix :warning:
+
+A malicious client could send a specially crafted HTTP request, triggering an uncaught exception and killing the Node.js process:
+
+> RangeError: Invalid WebSocket frame: RSV2 and RSV3 must be clear
+>   at Receiver.getInfo (/.../node_modules/ws/lib/receiver.js:176:14)
+>   at Receiver.startLoop (/.../node_modules/ws/lib/receiver.js:136:22)
+>   at Receiver._write (/.../node_modules/ws/lib/receiver.js:83:10)
+>   at writeOrBuffer (internal/streams/writable.js:358:12)
+
+This bug was introduced by [this commit](https://github.com/socketio/engine.io/commit/f3c291fa613a9d50c924d74293035737fdace4f2), included in `engine.io@4.0.0`, so previous releases are not impacted.
+
+Thanks to Marcus Wejderot from Mevisio for the responsible disclosure.
+
+### Bug Fixes
+
+* properly handle invalid data sent by a malicious websocket client ([c0e194d](https://github.com/socketio/engine.io/commit/c0e194d44933bd83bf9a4b126fca68ba7bf5098c))
+
+
+
+# [6.1.0](https://github.com/socketio/engine.io/compare/6.0.0...6.1.0) (2021-11-08)
+
+
+### Bug Fixes
+
+* fix payload encoding for v3 clients ([ed50fc3](https://github.com/socketio/engine.io/commit/ed50fc346b9c58459bf4e6fe5c45e8d34faac8da))
+
+
+### Features
+
+* add an implementation based on uWebSockets.js ([271e2df](https://github.com/socketio/engine.io/commit/271e2df94d39bbd13c33cab98cdd5915f9d28536))
+
+
+### Performance Improvements
+
+* refresh ping timer ([#628](https://github.com/socketio/engine.io/issues/628)) ([37474c7](https://github.com/socketio/engine.io/commit/37474c7e67be7c5f25f9ca2d4ea99f3a256bd2de))
+
+
+
+## [6.0.1](https://github.com/socketio/engine.io/compare/6.0.0...6.0.1) (2021-11-06)
+
+
+### Bug Fixes
+
+* fix payload encoding for v3 clients ([3f42262](https://github.com/socketio/engine.io/commit/3f42262fd27a77a7383cdbb44ede7c6211a9782b))
+
+
+
+# [6.0.0](https://github.com/socketio/engine.io/compare/5.2.0...6.0.0) (2021-10-08)
+
+The codebase was migrated to TypeScript ([c0d6eaa](https://github.com/socketio/engine.io/commit/c0d6eaa1ba1291946dc8425d5f533d5f721862dd))
+
+An ES module wrapper was also added ([401f4b6](https://github.com/socketio/engine.io/commit/401f4b60693fb6702c942692ce42e5bb701d81d7)).
+
+Please note that the communication protocol was not updated, so a v5 client will be able to reach a v6 server (and vice-versa).
+
+Reference: https://github.com/socketio/engine.io-protocol
+
+### BREAKING CHANGES
+
+- the default export was removed, so the following code won't work anymore:
+
+```js
+const eioServer = require("engine.io")(httpServer);
+```
+
+Please use this instead:
+
+```js
+const { Server } = require("engine.io");
+const eioServer = new Server(httpServer);
+```
+
+### Dependencies
+
+`ws` version: `~8.2.3` (bumped from `~7.4.2`)
+
+# [5.2.0](https://github.com/socketio/engine.io/compare/5.1.1...5.2.0) (2021-08-29)
+
+No change on the server-side, this matches the client release.
+
+
 ## [5.1.1](https://github.com/socketio/engine.io/compare/5.1.0...5.1.1) (2021-05-16)
 
 

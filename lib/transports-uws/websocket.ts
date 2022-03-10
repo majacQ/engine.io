@@ -1,20 +1,21 @@
-const Transport = require("../transport");
-const debug = require("debug")("engine:ws");
+import { Transport } from "../transport";
+import debugModule from "debug";
 
-class WebSocket extends Transport {
+const debug = debugModule("engine:ws");
+
+export class WebSocket extends Transport {
+  protected perMessageDeflate: any;
+  private socket: any;
+
   /**
    * WebSocket transport
    *
-   * @param {http.IncomingMessage}
+   * @param req
    * @api public
    */
   constructor(req) {
     super(req);
-    this.socket = req.websocket;
-    this.socket.on("message", this.onData.bind(this));
-    this.socket.once("close", this.onClose.bind(this));
-    this.socket.on("error", this.onError.bind(this));
-    this.writable = true;
+    this.writable = false;
     this.perMessageDeflate = null;
   }
 
@@ -46,17 +47,6 @@ class WebSocket extends Transport {
   }
 
   /**
-   * Processes the incoming data.
-   *
-   * @param {String} encoded packet
-   * @api private
-   */
-  onData(data) {
-    debug('received "%s"', data);
-    super.onData(data);
-  }
-
-  /**
    * Writes a packet payload.
    *
    * @param {Array} packets
@@ -71,26 +61,22 @@ class WebSocket extends Transport {
     }
 
     // always creates a new object since ws modifies it
-    const opts = {};
+    const opts: { compress?: boolean } = {};
     if (packet.options) {
       opts.compress = packet.options.compress;
     }
 
     const send = data => {
-      if (this.perMessageDeflate) {
-        const len =
-          "string" === typeof data ? Buffer.byteLength(data) : data.length;
-        if (len < this.perMessageDeflate.threshold) {
-          opts.compress = false;
-        }
-      }
+      const isBinary = typeof data !== "string";
+      const compress =
+        this.perMessageDeflate &&
+        Buffer.byteLength(data) > this.perMessageDeflate.threshold;
+
       debug('writing "%s"', data);
       this.writable = false;
 
-      this.socket.send(data, opts, err => {
-        if (err) return this.onError("write error", err.stack);
-        this.send(packets);
-      });
+      this.socket.send(data, isBinary, compress);
+      this.send(packets);
     };
 
     if (packet.options && typeof packet.options.wsPreEncoded === "string") {
@@ -107,9 +93,8 @@ class WebSocket extends Transport {
    */
   doClose(fn) {
     debug("closing");
-    this.socket.close();
     fn && fn();
+    // call fn first since socket.close() immediately emits a "close" event
+    this.socket.close();
   }
 }
-
-module.exports = WebSocket;

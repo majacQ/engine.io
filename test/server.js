@@ -6,8 +6,8 @@ const fs = require("fs");
 const path = require("path");
 const exec = require("child_process").exec;
 const zlib = require("zlib");
-const eio = require("..");
-const { eioc, listen, createPartialDone } = require("./common");
+const { Server, Socket, attach } = require("..");
+const { ClientSocket, listen, createPartialDone } = require("./common");
 const expect = require("expect.js");
 const request = require("superagent");
 const cookieMod = require("cookie");
@@ -20,7 +20,7 @@ describe("server", () => {
   let engine, client;
 
   afterEach(() => {
-    if (engine) {
+    if (engine && engine.httpServer) {
       engine.httpServer.close();
     }
     if (client) {
@@ -34,7 +34,7 @@ describe("server", () => {
 
       engine = listen(port => {
         engine.on("connection_error", err => {
-          expect(err.req).to.be.an(http.IncomingMessage);
+          expect(err.req).to.be.ok();
           expect(err.code).to.be(0);
           expect(err.message).to.be("Transport unknown");
           expect(err.context.transport).to.be("tobi");
@@ -42,7 +42,7 @@ describe("server", () => {
         });
 
         request
-          .get("http://localhost:%d/engine.io/default/".s(port))
+          .get(`http://localhost:${port}/engine.io/`)
           .query({ transport: "tobi" }) // no tobi transport - outrageous
           .end((err, res) => {
             expect(err).to.be.an(Error);
@@ -60,7 +60,7 @@ describe("server", () => {
       // make sure we check for actual properties - not those present on every {}
       engine = listen(port => {
         engine.on("connection_error", err => {
-          expect(err.req).to.be.an(http.IncomingMessage);
+          expect(err.req).to.be.ok();
           expect(err.code).to.be(0);
           expect(err.message).to.be("Transport unknown");
           expect(err.context.transport).to.be("constructor");
@@ -68,7 +68,7 @@ describe("server", () => {
         });
 
         request
-          .get("http://localhost:%d/engine.io/default/".s(port))
+          .get(`http://localhost:${port}/engine.io/`)
           .set("Origin", "http://engine.io")
           .query({ transport: "constructor" })
           .end((err, res) => {
@@ -86,7 +86,7 @@ describe("server", () => {
 
       engine = listen(port => {
         engine.on("connection_error", err => {
-          expect(err.req).to.be.an(http.IncomingMessage);
+          expect(err.req).to.be.ok();
           expect(err.code).to.be(1);
           expect(err.message).to.be("Session ID unknown");
           expect(err.context.sid).to.be("test");
@@ -94,7 +94,7 @@ describe("server", () => {
         });
 
         request
-          .get("http://localhost:%d/engine.io/default/".s(port))
+          .get(`http://localhost:${port}/engine.io/`)
           .set("Origin", "http://engine.io")
           .query({ transport: "polling", sid: "test" })
           .end((err, res) => {
@@ -118,7 +118,7 @@ describe("server", () => {
         },
         port => {
           engine.on("connection_error", err => {
-            expect(err.req).to.be.an(http.IncomingMessage);
+            expect(err.req).to.be.ok();
             expect(err.code).to.be(4);
             expect(err.message).to.be("Forbidden");
             expect(err.context.message).to.be("Thou shall not pass");
@@ -126,7 +126,7 @@ describe("server", () => {
           });
 
           request
-            .get("http://localhost:%d/engine.io/default/".s(port))
+            .get(`http://localhost:${port}/engine.io/`)
             .set("Origin", "http://engine.io")
             .query({ transport: "polling" })
             .end((err, res) => {
@@ -140,7 +140,7 @@ describe("server", () => {
       );
     });
 
-    it("should disallow connection that are rejected by `allowRequest`", done => {
+    it("should disallow connection that are rejected by `allowRequest` (ws)", done => {
       listen(
         {
           allowRequest: (req, fn) => {
@@ -148,7 +148,7 @@ describe("server", () => {
           }
         },
         port => {
-          const client = eioc("ws://localhost:%d".s(port), {
+          const client = new ClientSocket(`ws://localhost:${port}`, {
             transports: ["websocket"]
           });
           client.on("error", () => {
@@ -157,14 +157,54 @@ describe("server", () => {
         }
       );
     });
+
+    it("should not throw when the client sends invalid data during the handshake (ws only)", done => {
+      listen(port => {
+        // will throw "RangeError: Invalid WebSocket frame: RSV2 and RSV3 must be clear"
+        request
+          .get(`http://localhost:${port}/engine.io/`)
+          .set("connection", "upgrade")
+          .set("upgrade", "websocket")
+          .set("Sec-WebSocket-Version", "13")
+          .set("Sec-WebSocket-Key", "DXR4dX615eRds8nRmlhqtw==")
+          .query({ transport: "websocket", EIO: 4 })
+          .send("test")
+          .end(() => {});
+
+        setTimeout(done, 50);
+      });
+    });
+
+    it("should not throw when the client sends invalid data during the handshake (upgrade)", done => {
+      listen(port => {
+        request
+          .get(`http://localhost:${port}/engine.io/`)
+          .query({ transport: "polling", EIO: 4 })
+          .end((err, res) => {
+            const sid = JSON.parse(res.text.substring(1)).sid;
+
+            request
+              .get(`http://localhost:${port}/engine.io/`)
+              .set("connection", "upgrade")
+              .set("upgrade", "websocket")
+              .set("Sec-WebSocket-Version", "13")
+              .set("Sec-WebSocket-Key", "DXR4dX615eRds8nRmlhqtw==")
+              .query({ transport: "websocket", EIO: 4, sid })
+              .send("test")
+              .end(() => {});
+
+            setTimeout(done, 50);
+          });
+      });
+    });
   });
 
   describe("handshake", () => {
     it("should send the io cookie", done => {
       listen({ cookie: true }, port => {
         request
-          .get("http://localhost:%d/engine.io/default/".s(port))
-          .query({ transport: "polling", b64: 1 })
+          .get(`http://localhost:${port}/engine.io/`)
+          .query({ transport: "polling", EIO: 4 })
           .end((err, res) => {
             expect(err).to.be(null);
             // hack-obtain sid
@@ -180,7 +220,7 @@ describe("server", () => {
     it("should send the io cookie custom name", done => {
       listen({ cookie: { name: "woot" } }, port => {
         request
-          .get("http://localhost:%d/engine.io/default/".s(port))
+          .get(`http://localhost:${port}/engine.io/`)
           .query({ transport: "polling", b64: 1 })
           .end((err, res) => {
             expect(err).to.be(null);
@@ -196,7 +236,7 @@ describe("server", () => {
     it("should send the cookie with custom path", done => {
       listen({ cookie: { path: "/custom" } }, port => {
         request
-          .get("http://localhost:%d/engine.io/default/".s(port))
+          .get(`http://localhost:${port}/engine.io/`)
           .query({ transport: "polling", b64: 1 })
           .end((err, res) => {
             expect(err).to.be(null);
@@ -212,7 +252,7 @@ describe("server", () => {
     it("should send the cookie with path=false", done => {
       listen({ cookie: { path: false } }, port => {
         request
-          .get("http://localhost:%d/engine.io/default/".s(port))
+          .get(`http://localhost:${port}/engine.io/`)
           .query({ transport: "polling", b64: 1 })
           .end((err, res) => {
             expect(err).to.be(null);
@@ -228,7 +268,7 @@ describe("server", () => {
     it("should send the io cookie with httpOnly=true", done => {
       listen({ cookie: { httpOnly: true } }, port => {
         request
-          .get("http://localhost:%d/engine.io/default/".s(port))
+          .get(`http://localhost:${port}/engine.io/`)
           .query({ transport: "polling", b64: 1 })
           .end((err, res) => {
             expect(err).to.be(null);
@@ -244,7 +284,7 @@ describe("server", () => {
     it("should send the io cookie with sameSite=strict", done => {
       listen({ cookie: { sameSite: "strict" } }, port => {
         request
-          .get("http://localhost:%d/engine.io/default/".s(port))
+          .get(`http://localhost:${port}/engine.io/`)
           .query({ transport: "polling", b64: 1 })
           .end((err, res) => {
             expect(err).to.be(null);
@@ -260,7 +300,7 @@ describe("server", () => {
     it("should send the io cookie with httpOnly=false", done => {
       listen({ cookie: { httpOnly: false } }, port => {
         request
-          .get("http://localhost:%d/engine.io/default/".s(port))
+          .get(`http://localhost:${port}/engine.io/`)
           .query({ transport: "polling", b64: 1 })
           .end((err, res) => {
             expect(err).to.be(null);
@@ -276,7 +316,7 @@ describe("server", () => {
     it("should send the io cookie with httpOnly not boolean", done => {
       listen({ cookie: { httpOnly: "no" } }, port => {
         request
-          .get("http://localhost:%d/engine.io/default/".s(port))
+          .get(`http://localhost:${port}/engine.io/`)
           .query({ transport: "polling", b64: 1 })
           .end((err, res) => {
             expect(err).to.be(null);
@@ -292,7 +332,7 @@ describe("server", () => {
     it("should not send the io cookie", done => {
       listen({ cookie: false }, port => {
         request
-          .get("http://localhost:%d/engine.io/default/".s(port))
+          .get(`http://localhost:${port}/engine.io/`)
           .query({ transport: "polling" })
           .end((err, res) => {
             expect(err).to.be(null);
@@ -307,7 +347,7 @@ describe("server", () => {
         expect(Object.keys(engine.clients)).to.have.length(0);
         expect(engine.clientsCount).to.be(0);
 
-        const socket = new eioc.Socket("ws://localhost:%d".s(port));
+        const socket = new ClientSocket(`ws://localhost:${port}`);
         socket.on("open", () => {
           expect(Object.keys(engine.clients)).to.have.length(1);
           expect(engine.clientsCount).to.be(1);
@@ -325,7 +365,7 @@ describe("server", () => {
 
         engine.generateId = req => customId;
 
-        const socket = new eioc.Socket("ws://localhost:%d".s(port));
+        const socket = new ClientSocket(`ws://localhost:${port}`);
         socket.once("open", () => {
           expect(Object.keys(engine.clients)).to.have.length(1);
           expect(engine.clientsCount).to.be(1);
@@ -342,7 +382,7 @@ describe("server", () => {
 
         engine.generateId = () => Promise.resolve(customId);
 
-        const socket = new eioc.Socket("ws://localhost:%d".s(port));
+        const socket = new ClientSocket(`ws://localhost:${port}`);
         socket.once("open", () => {
           expect(socket.id).to.be(customId);
           expect(engine.clients[customId].id).to.be(customId);
@@ -360,14 +400,14 @@ describe("server", () => {
         };
 
         engine.on("connection_error", err => {
-          expect(err.req).to.be.an(http.IncomingMessage);
+          expect(err.req).to.be.ok();
           expect(err.code).to.be(3);
           expect(err.message).to.be("Bad request");
           expect(err.context.name).to.be("ID_GENERATION_ERROR");
           partialDone();
         });
 
-        const socket = new eioc.Socket("ws://localhost:%d".s(port));
+        const socket = new ClientSocket(`ws://localhost:${port}`);
         socket.on("error", () => {
           partialDone();
         });
@@ -376,7 +416,7 @@ describe("server", () => {
 
     it("should disallow connection that are rejected by `generateId` (websocket only)", function(done) {
       if (process.env.EIO_WS_ENGINE === "eiows") {
-        this.skip();
+        return this.skip();
       }
       const partialDone = createPartialDone(done, 2);
 
@@ -386,14 +426,14 @@ describe("server", () => {
         };
 
         engine.on("connection_error", err => {
-          expect(err.req).to.be.an(http.IncomingMessage);
+          expect(err.req).to.be.ok();
           expect(err.code).to.be(3);
           expect(err.message).to.be("Bad request");
           expect(err.context.name).to.be("ID_GENERATION_ERROR");
           partialDone();
         });
 
-        const socket = new eioc.Socket("ws://localhost:%d".s(port), {
+        const socket = new ClientSocket(`ws://localhost:${port}`, {
           transports: ["websocket"]
         });
         socket.on("error", () => {
@@ -404,11 +444,12 @@ describe("server", () => {
 
     it("should exchange handshake data", done => {
       listen({ allowUpgrades: false }, port => {
-        const socket = new eioc.Socket("ws://localhost:%d".s(port));
+        const socket = new ClientSocket(`ws://localhost:${port}`);
         socket.on("handshake", obj => {
           expect(obj.sid).to.be.a("string");
           expect(obj.pingTimeout).to.be.a("number");
           expect(obj.upgrades).to.be.an("array");
+          expect(obj.maxPayload).to.eql(1000000);
           done();
         });
       });
@@ -416,7 +457,7 @@ describe("server", () => {
 
     it("should allow custom ping timeouts", done => {
       listen({ allowUpgrades: false, pingTimeout: 123 }, port => {
-        const socket = new eioc.Socket("http://localhost:%d".s(port));
+        const socket = new ClientSocket(`http://localhost:${port}`);
         socket.on("handshake", obj => {
           expect(obj.pingTimeout).to.be(123);
           done();
@@ -426,9 +467,9 @@ describe("server", () => {
 
     it("should trigger a connection event with a Socket", done => {
       const engine = listen({ allowUpgrades: false }, port => {
-        eioc("ws://localhost:%d".s(port));
+        new ClientSocket(`ws://localhost:${port}`);
         engine.on("connection", socket => {
-          expect(socket).to.be.an(eio.Socket);
+          expect(socket).to.be.an(Socket);
           done();
         });
       });
@@ -436,7 +477,7 @@ describe("server", () => {
 
     it("should open with polling by default", done => {
       const engine = listen({ allowUpgrades: false }, port => {
-        eioc("ws://localhost:%d".s(port));
+        new ClientSocket(`ws://localhost:${port}`);
         engine.on("connection", socket => {
           expect(socket.transport.name).to.be("polling");
           done();
@@ -446,7 +487,9 @@ describe("server", () => {
 
     it("should be able to open with ws directly", done => {
       const engine = listen({ transports: ["websocket"] }, port => {
-        eioc("ws://localhost:%d".s(port), { transports: ["websocket"] });
+        new ClientSocket(`ws://localhost:${port}`, {
+          transports: ["websocket"]
+        });
         engine.on("connection", socket => {
           expect(socket.transport.name).to.be("websocket");
           done();
@@ -456,7 +499,7 @@ describe("server", () => {
 
     it("should not suggest any upgrades for websocket", done => {
       listen({ transports: ["websocket"] }, port => {
-        const socket = new eioc.Socket("ws://localhost:%d".s(port), {
+        const socket = new ClientSocket(`ws://localhost:${port}`, {
           transports: ["websocket"]
         });
         socket.on("handshake", obj => {
@@ -468,7 +511,7 @@ describe("server", () => {
 
     it("should not suggest upgrades when none are availble", done => {
       listen({ transports: ["polling"] }, port => {
-        const socket = new eioc.Socket("ws://localhost:%d".s(port), {});
+        const socket = new ClientSocket(`ws://localhost:${port}`, {});
         socket.on("handshake", obj => {
           expect(obj.upgrades).to.have.length(0);
           done();
@@ -478,7 +521,7 @@ describe("server", () => {
 
     it("should only suggest available upgrades", done => {
       listen({ transports: ["polling"] }, port => {
-        const socket = new eioc.Socket("ws://localhost:%d".s(port), {});
+        const socket = new ClientSocket(`ws://localhost:${port}`, {});
         socket.on("handshake", obj => {
           expect(obj.upgrades).to.have.length(0);
           done();
@@ -488,7 +531,7 @@ describe("server", () => {
 
     it("should suggest all upgrades when no transports are disabled", done => {
       listen({}, port => {
-        const socket = new eioc.Socket("ws://localhost:%d".s(port), {});
+        const socket = new ClientSocket(`ws://localhost:${port}`, {});
         socket.on("handshake", obj => {
           expect(obj.upgrades).to.have.length(1);
           expect(obj.upgrades).to.have.contain("websocket");
@@ -508,7 +551,7 @@ describe("server", () => {
         });
 
         engine.on("connection_error", err => {
-          expect(err.req).to.be.an(http.IncomingMessage);
+          expect(err.req).to.be.ok();
           expect(err.code).to.be(3);
           expect(err.message).to.be("Bad request");
           expect(err.context.name).to.be("TRANSPORT_MISMATCH");
@@ -517,10 +560,10 @@ describe("server", () => {
           partialDone();
         });
 
-        var socket = new eioc.Socket("ws://localhost:%d".s(port));
+        var socket = new ClientSocket(`ws://localhost:${port}`);
         socket.on("open", () => {
           request
-            .get("http://localhost:%d/engine.io/".s(port))
+            .get(`http://localhost:${port}/engine.io/`)
             .set({ connection: "close" })
             .query({ transport: "websocket", sid: socket.id })
             .end((err, res) => {
@@ -539,7 +582,7 @@ describe("server", () => {
 
     it("should allow arbitrary data through query string", done => {
       const engine = listen({ allowUpgrades: false }, port => {
-        eioc("ws://localhost:%d".s(port), { query: { a: "b" } });
+        new ClientSocket(`ws://localhost:${port}`, { query: { a: "b" } });
         engine.on("connection", conn => {
           expect(conn.request._query).to.have.keys("transport", "a");
           expect(conn.request._query.a).to.be("b");
@@ -550,7 +593,7 @@ describe("server", () => {
 
     it("should allow data through query string in uri", done => {
       const engine = listen({ allowUpgrades: false }, port => {
-        eioc("ws://localhost:%d?a=b&c=d".s(port));
+        new ClientSocket(`ws://localhost:${port}?a=b&c=d`);
         engine.on("connection", conn => {
           expect(conn.request._query.EIO).to.be.a("string");
           expect(conn.request._query.a).to.be("b");
@@ -560,7 +603,7 @@ describe("server", () => {
       });
     });
 
-    it("should disallow bad requests (handshake error)", done => {
+    it("should disallow bad requests (handshake error)", function(done) {
       const partialDone = createPartialDone(done, 2);
 
       engine = listen(
@@ -569,17 +612,15 @@ describe("server", () => {
         },
         port => {
           engine.on("connection_error", err => {
-            expect(err.req).to.be.an(http.IncomingMessage);
+            expect(err.req).to.be.ok();
             expect(err.code).to.be(3);
             expect(err.message).to.be("Bad request");
             expect(err.context.name).to.be("TRANSPORT_HANDSHAKE_ERROR");
-            expect(err.context.error).to.be.an(Error);
-            expect(err.context.error.name).to.be("TypeError");
             partialDone();
           });
 
           request
-            .get("http://localhost:%d/engine.io/default/".s(port))
+            .get(`http://localhost:${port}/engine.io/`)
             .set("Origin", "http://engine.io")
             .query({ transport: "websocket" })
             .end((err, res) => {
@@ -599,19 +640,22 @@ describe("server", () => {
       );
     });
 
-    it("should disallow invalid origin header", done => {
+    it("should disallow invalid origin header", function(done) {
+      if (process.env.EIO_WS_ENGINE === "uws") {
+        return this.skip();
+      }
       const partialDone = createPartialDone(done, 2);
 
       engine = listen(port => {
         // we can't send an invalid header through request.get
         // so add an invalid char here
         engine.prepare = function(req) {
-          eio.Server.prototype.prepare.call(engine, req);
+          Server.prototype.prepare.call(engine, req);
           req.headers.origin += "\n";
         };
 
         engine.on("connection_error", err => {
-          expect(err.req).to.be.an(http.IncomingMessage);
+          expect(err.req).to.be.ok();
           expect(err.code).to.be(3);
           expect(err.message).to.be("Bad request");
           expect(err.context.name).to.be("INVALID_ORIGIN");
@@ -620,7 +664,7 @@ describe("server", () => {
         });
 
         request
-          .get("http://localhost:%d/engine.io/default/".s(port))
+          .get(`http://localhost:${port}/engine.io/`)
           .set("Origin", "http://engine.io/")
           .query({ transport: "websocket" })
           .end((err, res) => {
@@ -638,7 +682,7 @@ describe("server", () => {
 
       engine = listen(port => {
         engine.on("connection_error", err => {
-          expect(err.req).to.be.an(http.IncomingMessage);
+          expect(err.req).to.be.ok();
           expect(err.code).to.be(2);
           expect(err.message).to.be("Bad handshake method");
           expect(err.context.method).to.be("OPTIONS");
@@ -646,7 +690,7 @@ describe("server", () => {
         });
 
         request
-          .options("http://localhost:%d/engine.io/default/".s(port))
+          .options(`http://localhost:${port}/engine.io/`)
           .query({ transport: "polling" })
           .end((err, res) => {
             expect(err).to.be.an(Error);
@@ -662,13 +706,13 @@ describe("server", () => {
       const partialDone = createPartialDone(done, 2);
 
       const httpServer = http.createServer();
-      const engine = eio({ allowEIO3: false });
+      const engine = new Server({ allowEIO3: false });
       engine.attach(httpServer);
       httpServer.listen(() => {
         const port = httpServer.address().port;
 
         engine.on("connection_error", err => {
-          expect(err.req).to.be.an(http.IncomingMessage);
+          expect(err.req).to.be.ok();
           expect(err.code).to.be(5);
           expect(err.message).to.be("Unsupported protocol version");
           expect(err.context.protocol).to.be(3);
@@ -678,7 +722,7 @@ describe("server", () => {
         });
 
         request
-          .get("http://localhost:%d/engine.io/".s(port))
+          .get(`http://localhost:${port}/engine.io/`)
           .query({ transport: "polling", EIO: 3 })
           .end((err, res) => {
             expect(err).to.be.an(Error);
@@ -692,7 +736,7 @@ describe("server", () => {
 
     it("should send a packet along with the handshake", done => {
       listen({ initialPacket: "faster!" }, port => {
-        const socket = new eioc.Socket("ws://localhost:%d".s(port));
+        const socket = new ClientSocket(`ws://localhost:${port}`);
         socket.on("open", () => {
           socket.on("message", msg => {
             expect(msg).to.be("faster!");
@@ -707,7 +751,7 @@ describe("server", () => {
     it("should be able to access non-empty writeBuffer at closing (server)", done => {
       const opts = { allowUpgrades: false };
       const engine = listen(opts, port => {
-        eioc("http://localhost:%d".s(port));
+        new ClientSocket(`http://localhost:${port}`);
         engine.on("connection", conn => {
           conn.on("close", reason => {
             expect(conn.writeBuffer.length).to.be(1);
@@ -725,7 +769,7 @@ describe("server", () => {
     it("should be able to access non-empty writeBuffer at closing (client)", done => {
       const opts = { allowUpgrades: false };
       listen(opts, port => {
-        const socket = new eioc.Socket("http://localhost:%d".s(port));
+        const socket = new ClientSocket(`http://localhost:${port}`);
         socket.on("open", () => {
           socket.on("close", reason => {
             expect(socket.writeBuffer.length).to.be(1);
@@ -743,7 +787,7 @@ describe("server", () => {
     it("should trigger on server if the client does not pong", done => {
       const opts = { allowUpgrades: false, pingInterval: 5, pingTimeout: 5 };
       const engine = listen(opts, port => {
-        const socket = new eioc.Socket("http://localhost:%d".s(port));
+        const socket = new ClientSocket(`http://localhost:${port}`);
         socket.sendPacket = () => {};
         engine.on("connection", conn => {
           conn.on("close", reason => {
@@ -761,7 +805,7 @@ describe("server", () => {
         pingTimeout: 500
       };
       const engine = listen(opts, port => {
-        const socket = new eioc.Socket("http://localhost:%d".s(port));
+        const socket = new ClientSocket(`http://localhost:${port}`);
         engine.on("connection", conn => {
           conn.on("close", reason => {
             expect(reason).to.be("ping timeout");
@@ -780,7 +824,7 @@ describe("server", () => {
     it("should trigger on client if server does not meet ping timeout", done => {
       const opts = { allowUpgrades: false, pingInterval: 50, pingTimeout: 30 };
       listen(opts, port => {
-        const socket = new eioc.Socket("ws://localhost:%d".s(port));
+        const socket = new ClientSocket(`ws://localhost:${port}`);
         socket.on("open", () => {
           // override onPacket and Transport#onClose to simulate an inactive server after handshake
           socket.transport.removeListener("packet");
@@ -796,7 +840,7 @@ describe("server", () => {
     it("should trigger on both ends upon ping timeout", done => {
       const opts = { allowUpgrades: false, pingTimeout: 50, pingInterval: 50 };
       const engine = listen(opts, port => {
-        const socket = new eioc.Socket("ws://localhost:%d".s(port));
+        const socket = new ClientSocket(`ws://localhost:${port}`);
         let total = 2;
 
         function onClose(reason, err) {
@@ -820,7 +864,7 @@ describe("server", () => {
 
     it("should trigger when server closes a client", done => {
       const engine = listen({ allowUpgrades: false }, port => {
-        const socket = new eioc.Socket("ws://localhost:%d".s(port));
+        const socket = new ClientSocket(`ws://localhost:${port}`);
         let total = 2;
 
         engine.on("connection", conn => {
@@ -845,7 +889,7 @@ describe("server", () => {
     it("should trigger when server closes a client (ws)", done => {
       const opts = { allowUpgrades: false, transports: ["websocket"] };
       const engine = listen(opts, port => {
-        const socket = new eioc.Socket("ws://localhost:%d".s(port), {
+        const socket = new ClientSocket(`ws://localhost:${port}`, {
           transports: ["websocket"]
         });
         let total = 2;
@@ -869,13 +913,16 @@ describe("server", () => {
       });
     });
 
-    it("should allow client reconnect after restarting (ws)", done => {
+    it("should allow client reconnect after restarting (ws)", function(done) {
+      if (process.env.EIO_WS_ENGINE === "uws") {
+        return this.skip();
+      }
       const opts = { transports: ["websocket"] };
       const engine = listen(opts, port => {
         engine.httpServer.close();
         engine.httpServer.listen(port);
 
-        const socket = new eioc.Socket("ws://localhost:%d".s(port), {
+        const socket = new ClientSocket(`ws://localhost:${port}`, {
           transports: ["websocket"]
         });
 
@@ -894,7 +941,7 @@ describe("server", () => {
 
     it("should trigger when client closes", done => {
       const engine = listen({ allowUpgrades: false }, port => {
-        const socket = new eioc.Socket("ws://localhost:%d".s(port));
+        const socket = new ClientSocket(`ws://localhost:${port}`);
         let total = 2;
 
         engine.on("connection", conn => {
@@ -920,7 +967,7 @@ describe("server", () => {
     it("should trigger when client closes (ws)", done => {
       const opts = { allowUpgrades: false, transports: ["websocket"] };
       const engine = listen(opts, port => {
-        const socket = new eioc.Socket("ws://localhost:%d".s(port), {
+        const socket = new ClientSocket(`ws://localhost:${port}`, {
           transports: ["websocket"]
         });
         let total = 2;
@@ -947,7 +994,7 @@ describe("server", () => {
 
     it("should trigger when calling socket.close() in payload", done => {
       const engine = listen({ allowUpgrades: false }, port => {
-        const socket = new eioc.Socket("ws://localhost:%d".s(port));
+        const socket = new ClientSocket(`ws://localhost:${port}`);
 
         engine.on("connection", conn => {
           conn.send(null, () => {
@@ -975,7 +1022,7 @@ describe("server", () => {
 
     it("should abort upgrade if socket is closed (GH-35)", done => {
       listen({ allowUpgrades: true }, port => {
-        const socket = new eioc.Socket("ws://localhost:%d".s(port));
+        const socket = new ClientSocket(`ws://localhost:${port}`);
         socket.on("open", () => {
           socket.close();
           // we wait until complete to see if we get an uncaught EPIPE
@@ -1029,7 +1076,7 @@ describe("server", () => {
             $done();
           }
 
-          var socket = new eioc.Socket("ws://localhost:%d".s(port));
+          var socket = new ClientSocket(`ws://localhost:${port}`);
           let serverSocket;
 
           engine.on("connection", s => {
@@ -1088,7 +1135,7 @@ describe("server", () => {
           });
         });
 
-        var socket = new eioc.Socket("ws://localhost:%d".s(port));
+        var socket = new ClientSocket(`ws://localhost:${port}`);
         socket.on("open", () => {
           socket.send("test");
         });
@@ -1111,7 +1158,7 @@ describe("server", () => {
           pingTimeout: 100
         };
         listen(opts, port => {
-          const socket = new eioc.Socket("ws://localhost:%d".s(port));
+          const socket = new ClientSocket(`ws://localhost:${port}`);
           let clientCloseReason = null;
 
           socket.on("handshake", () => {
@@ -1143,7 +1190,7 @@ describe("server", () => {
           pingTimeout: 50
         };
         const engine = listen(opts, port => {
-          const socket = new eioc.Socket("ws://localhost:%d".s(port));
+          const socket = new ClientSocket(`ws://localhost:${port}`);
           let clientCloseReason = null;
 
           engine.on("connection", conn => {
@@ -1178,7 +1225,7 @@ describe("server", () => {
           pingTimeout: 50
         };
         const engine = listen(opts, port => {
-          const socket = new eioc.Socket("ws://localhost:%d".s(port));
+          const socket = new ClientSocket(`ws://localhost:${port}`);
           let clientCloseReason = null;
 
           socket.on("open", () => {
@@ -1213,7 +1260,7 @@ describe("server", () => {
             pingTimeout: 100
           };
           const engine = listen(opts, port => {
-            const socket = new eioc.Socket("ws://localhost:%d".s(port));
+            const socket = new ClientSocket(`ws://localhost:${port}`);
             let clientCloseReason = null;
 
             socket.on("open", () => {
@@ -1251,7 +1298,7 @@ describe("server", () => {
             pingTimeout: 100
           };
           const engine = listen(opts, port => {
-            const socket = new eioc.Socket("ws://localhost:%d".s(port));
+            const socket = new ClientSocket(`ws://localhost:${port}`);
             let clientCloseReason = null;
 
             socket.on("open", () => {
@@ -1282,9 +1329,12 @@ describe("server", () => {
 
     it(
       "should abort the polling data request if it is " + "in progress",
-      done => {
+      function(done) {
+        if (process.env.EIO_WS_ENGINE === "uws") {
+          return this.skip();
+        }
         const engine = listen({ transports: ["polling"] }, port => {
-          const socket = new eioc.Socket("http://localhost:%d".s(port));
+          const socket = new ClientSocket(`http://localhost:${port}`);
 
           engine.on("connection", conn => {
             const onDataRequest = conn.transport.onDataRequest;
@@ -1308,8 +1358,8 @@ describe("server", () => {
     it("should trigger transport close before open for ws", done => {
       const opts = { transports: ["websocket"] };
       listen(opts, port => {
-        const url = "ws://%s:%d".s("0.0.0.0", port);
-        const socket = new eioc.Socket(url);
+        const url = `ws://0.0.0.0:${port}`;
+        const socket = new ClientSocket(url);
         socket.on("open", () => {
           done(new Error("Test invalidation"));
         });
@@ -1325,7 +1375,7 @@ describe("server", () => {
     it("should trigger transport close before open for xhr", done => {
       const opts = { transports: ["polling"] };
       listen(opts, port => {
-        const socket = new eioc.Socket("http://invalidserver:%d".s(port));
+        const socket = new ClientSocket(`http://invalidserver:${port}`);
         socket.on("open", () => {
           done(new Error("Test invalidation"));
         });
@@ -1341,7 +1391,7 @@ describe("server", () => {
     it("should trigger force close before open for ws", done => {
       const opts = { transports: ["websocket"] };
       listen(opts, port => {
-        const socket = new eioc.Socket("ws://localhost:%d".s(port));
+        const socket = new ClientSocket(`ws://localhost:${port}`);
         socket.on("open", () => {
           done(new Error("Test invalidation"));
         });
@@ -1358,7 +1408,7 @@ describe("server", () => {
     it("should trigger force close before open for xhr", done => {
       const opts = { transports: ["polling"] };
       listen(opts, port => {
-        const socket = new eioc.Socket("http://localhost:%d".s(port));
+        const socket = new ClientSocket(`http://localhost:${port}`);
         socket.on("open", () => {
           done(new Error("Test invalidation"));
         });
@@ -1381,7 +1431,7 @@ describe("server", () => {
         engine.on("connection", conn => {
           conn.transport.on("close", done);
         });
-        const socket = new eioc.Socket("ws://localhost:%d".s(port), {
+        const socket = new ClientSocket(`ws://localhost:${port}`, {
           transports: ["websocket"]
         });
         // override to simulate an inactive client
@@ -1400,7 +1450,7 @@ describe("server", () => {
         engine.on("connection", conn => {
           conn.transport.on("close", done);
         });
-        const socket = new eioc.Socket("ws://localhost:%d".s(port), {
+        const socket = new ClientSocket(`ws://localhost:${port}`, {
           transports: ["polling"]
         });
         // override to simulate an inactive client
@@ -1414,7 +1464,7 @@ describe("server", () => {
         engine.on("connection", conn => {
           conn.transport.on("close", done);
         });
-        const socket = new eioc.Socket("ws://localhost:%d".s(port), {
+        const socket = new ClientSocket(`ws://localhost:${port}`, {
           transports: ["websocket"]
         });
         socket.on("open", () => {
@@ -1430,7 +1480,7 @@ describe("server", () => {
           conn.transport.closeTimeout = 100;
           conn.transport.on("close", done);
         });
-        const socket = new eioc.Socket("ws://localhost:%d".s(port), {
+        const socket = new ClientSocket(`ws://localhost:${port}`, {
           transports: ["polling"]
         });
         socket.on("open", () => {
@@ -1447,7 +1497,7 @@ describe("server", () => {
             conn.close();
           });
         });
-        eioc("ws://localhost:%d".s(port));
+        new ClientSocket(`ws://localhost:${port}`);
       });
     });
 
@@ -1459,7 +1509,7 @@ describe("server", () => {
             transport.on("close", done);
           });
         });
-        const socket = new eioc.Socket("ws://localhost:%d".s(port));
+        const socket = new ClientSocket(`ws://localhost:${port}`);
         socket.on("upgrading", transport => {
           // override not to complete upgrading
           transport.send = () => {};
@@ -1470,7 +1520,7 @@ describe("server", () => {
     it("should not timeout after an upgrade", done => {
       const opts = { pingInterval: 200, pingTimeout: 20 };
       const engine = listen(opts, port => {
-        const socket = new eioc.Socket("ws://localhost:%d".s(port));
+        const socket = new ClientSocket(`ws://localhost:${port}`);
         socket.on("open", () => {
           setTimeout(() => {
             socket.removeListener("close");
@@ -1488,7 +1538,7 @@ describe("server", () => {
     it("should not crash when messing with Object prototype", done => {
       Object.prototype.foo = "bar"; // eslint-disable-line no-extend-native
       const engine = listen({ allowUpgrades: true }, port => {
-        const socket = new eioc.Socket("ws://localhost:%d".s(port));
+        const socket = new ClientSocket(`ws://localhost:${port}`);
         socket.on("open", () => {
           engine.close();
           setTimeout(() => {
@@ -1499,6 +1549,12 @@ describe("server", () => {
     });
 
     describe("graceful close", () => {
+      before(function() {
+        if (process.env.EIO_WS_ENGINE === "uws") {
+          this.skip();
+        }
+      });
+
       function fixture(filename) {
         return (
           process.execPath + " " + path.join(__dirname, "fixtures", filename)
@@ -1524,7 +1580,7 @@ describe("server", () => {
 
     it("should arrive from server to client", done => {
       const engine = listen({ allowUpgrades: false }, port => {
-        const socket = new eioc.Socket("ws://localhost:%d".s(port));
+        const socket = new ClientSocket(`ws://localhost:${port}`);
         engine.on("connection", conn => {
           conn.send("a");
         });
@@ -1539,7 +1595,7 @@ describe("server", () => {
 
     it("should arrive from server to client (multiple)", done => {
       const engine = listen({ allowUpgrades: false }, port => {
-        const socket = new eioc.Socket("ws://localhost:%d".s(port));
+        const socket = new ClientSocket(`ws://localhost:${port}`);
         const expected = ["a", "b", "c"];
         let i = 0;
 
@@ -1581,7 +1637,7 @@ describe("server", () => {
         maxHttpBufferSize: 5
       };
       const engine = listen(opts, port => {
-        const socket = new eioc.Socket("ws://localhost:%d".s(port));
+        const socket = new ClientSocket(`ws://localhost:${port}`);
         engine.on("connection", conn => {
           conn.on("message", msg => {
             done(
@@ -1601,7 +1657,7 @@ describe("server", () => {
     it("should not be receiving data when getting a message longer than maxHttpBufferSize (websocket)", done => {
       const opts = { maxHttpBufferSize: 5 };
       const engine = listen(opts, port => {
-        const socket = new eioc.Socket("ws://localhost:%d".s(port), {
+        const socket = new ClientSocket(`ws://localhost:${port}`, {
           transports: ["websocket"]
         });
         engine.on("connection", conn => {
@@ -1627,7 +1683,7 @@ describe("server", () => {
         maxHttpBufferSize: 5
       };
       const engine = listen(opts, port => {
-        const socket = new eioc.Socket("ws://localhost:%d".s(port));
+        const socket = new ClientSocket(`ws://localhost:${port}`);
         engine.on("connection", conn => {
           conn.on("message", msg => {
             expect(msg).to.be("a");
@@ -1643,7 +1699,7 @@ describe("server", () => {
     it("should arrive from server to client (ws)", done => {
       const opts = { allowUpgrades: false, transports: ["websocket"] };
       const engine = listen(opts, port => {
-        const socket = new eioc.Socket("ws://localhost:%d".s(port), {
+        const socket = new ClientSocket(`ws://localhost:${port}`, {
           transports: ["websocket"]
         });
         engine.on("connection", conn => {
@@ -1661,7 +1717,7 @@ describe("server", () => {
     it("should arrive from server to client (multiple, ws)", done => {
       const opts = { allowUpgrades: false, transports: ["websocket"] };
       const engine = listen(opts, port => {
-        const socket = new eioc.Socket("ws://localhost:%d".s(port), {
+        const socket = new ClientSocket(`ws://localhost:${port}`, {
           transports: ["websocket"]
         });
         const expected = ["a", "b", "c"];
@@ -1695,7 +1751,7 @@ describe("server", () => {
     it("should arrive from server to client (multiple, no delay, ws)", done => {
       const opts = { allowUpgrades: false, transports: ["websocket"] };
       const engine = listen(opts, port => {
-        const socket = new eioc.Socket("ws://localhost:%d".s(port), {
+        const socket = new ClientSocket(`ws://localhost:${port}`, {
           transports: ["websocket"]
         });
         const expected = ["a", "b", "c"];
@@ -1732,7 +1788,7 @@ describe("server", () => {
 
       const opts = { allowUpgrades: false, transports: ["websocket"] };
       const engine = listen(opts, port => {
-        const socket = new eioc.Socket("ws://localhost:%d".s(port), {
+        const socket = new ClientSocket(`ws://localhost:${port}`, {
           transports: ["websocket"]
         });
 
@@ -1760,7 +1816,7 @@ describe("server", () => {
 
       const opts = { allowUpgrades: false, transports: ["websocket"] };
       const engine = listen(opts, port => {
-        const socket = new eioc.Socket("ws://localhost:%d".s(port), {
+        const socket = new ClientSocket(`ws://localhost:${port}`, {
           transports: ["websocket"]
         });
 
@@ -1790,7 +1846,7 @@ describe("server", () => {
 
       const opts = { allowUpgrades: false, transports: ["websocket"] };
       const engine = listen(opts, port => {
-        const socket = new eioc.Socket("ws://localhost:%d".s(port), {
+        const socket = new ClientSocket(`ws://localhost:${port}`, {
           transports: ["websocket"]
         });
 
@@ -1820,7 +1876,7 @@ describe("server", () => {
 
       const opts = { allowUpgrades: false, transports: ["websocket"] };
       const engine = listen(opts, port => {
-        const socket = new eioc.Socket("ws://localhost:%d".s(port), {
+        const socket = new ClientSocket(`ws://localhost:${port}`, {
           transports: ["websocket"]
         });
 
@@ -1848,7 +1904,7 @@ describe("server", () => {
 
       const opts = { allowUpgrades: false, transports: ["polling"] };
       const engine = listen(opts, port => {
-        const socket = new eioc.Socket("ws://localhost:%d".s(port), {
+        const socket = new ClientSocket(`ws://localhost:${port}`, {
           transports: ["polling"]
         });
 
@@ -1877,7 +1933,7 @@ describe("server", () => {
 
       const opts = { allowUpgrades: false, transports: ["websocket"] };
       const engine = listen(opts, port => {
-        const socket = new eioc.Socket("ws://localhost:%d".s(port), {
+        const socket = new ClientSocket(`ws://localhost:${port}`, {
           transports: ["websocket"]
         });
         socket.binaryType = "arraybuffer";
@@ -1900,6 +1956,65 @@ describe("server", () => {
       });
     });
 
+    it("should arrive when content is split in multiple chunks (polling)", done => {
+      const engine = listen(
+        {
+          maxHttpBufferSize: 1e10
+        },
+        port => {
+          const client = new ClientSocket(`ws://localhost:${port}`, {
+            transports: ["polling"]
+          });
+
+          engine.on("connection", socket => {
+            socket.on("message", data => {
+              client.close();
+              done();
+            });
+          });
+
+          client.on("open", () => {
+            client.send("a".repeat(1e6));
+          });
+        }
+      );
+    });
+
+    it("should arrive when content is sent with chunked transfer-encoding (polling)", function(done) {
+      if (process.env.EIO_WS_ENGINE === "uws") {
+        // µWebSockets.js does not currently support chunked encoding: https://github.com/uNetworking/uWebSockets.js/issues/669
+        return this.skip();
+      }
+      const engine = listen(port => {
+        const client = new ClientSocket(`ws://localhost:${port}`, {
+          transports: ["polling"]
+        });
+
+        engine.on("connection", socket => {
+          socket.on("message", data => {
+            expect(data).to.eql("123");
+
+            client.close();
+            done();
+          });
+        });
+
+        client.on("open", () => {
+          const req = http.request({
+            host: "localhost",
+            port,
+            path: `/engine.io/?EIO=4&transport=polling&sid=${client.id}`,
+            method: "POST"
+          });
+
+          req.write(process.env.EIO_CLIENT === "3" ? "4:41" : "41");
+          req.write("2");
+          req.write("3");
+          req.end();
+        });
+      });
+    });
+
     it("should arrive as ArrayBuffer if requested when binary data sent as Buffer (polling)", done => {
       const binaryData = Buffer.allocUnsafe(5);
       for (let i = 0; i < binaryData.length; i++) {
@@ -1908,7 +2023,7 @@ describe("server", () => {
 
       const opts = { allowUpgrades: false, transports: ["polling"] };
       const engine = listen(opts, port => {
-        const socket = new eioc.Socket("ws://localhost:%d".s(port), {
+        const socket = new ClientSocket(`ws://localhost:${port}`, {
           transports: ["polling"]
         });
         socket.binaryType = "arraybuffer";
@@ -1959,7 +2074,7 @@ describe("server", () => {
           socket.send("aaaa");
         });
 
-        eioc("ws://localhost:%d".s(port));
+        new ClientSocket(`ws://localhost:${port}`);
       });
     });
 
@@ -1967,6 +2082,9 @@ describe("server", () => {
       "should interleave with pongs if many messages buffered " +
         "after connection open",
       function(done) {
+        if (process.env.EIO_WS_ENGINE === "uws") {
+          return this.skip();
+        }
         this.slow(4000);
         this.timeout(8000);
 
@@ -1983,7 +2101,7 @@ describe("server", () => {
           engine.on("connection", conn => {
             connection = conn;
           });
-          const socket = new eioc.Socket("ws://localhost:%d".s(port), {
+          const socket = new ClientSocket(`ws://localhost:${port}`, {
             transports: ["websocket"]
           });
           socket.on("open", () => {
@@ -2005,7 +2123,7 @@ describe("server", () => {
 
     it("should support chinese", done => {
       const engine = listen({ allowUpgrades: false }, port => {
-        const socket = new eioc.Socket("ws://localhost:%d".s(port));
+        const socket = new ClientSocket(`ws://localhost:${port}`);
         const shi = "石室詩士施氏，嗜獅，誓食十獅。";
         const shi2 = "氏時時適市視獅。";
         engine.on("connection", conn => {
@@ -2040,7 +2158,10 @@ describe("server", () => {
       });
     });
 
-    it("should send and receive data with key and cert (polling)", done => {
+    it("should send and receive data with key and cert (polling)", function(done) {
+      if (process.env.EIO_WS_ENGINE === "uws") {
+        return this.skip();
+      }
       const srvOpts = {
         key: fs.readFileSync("test/fixtures/server.key"),
         cert: fs.readFileSync("test/fixtures/server.crt"),
@@ -2061,7 +2182,7 @@ describe("server", () => {
         res.end("hello world\n");
       });
 
-      const engine = eio({
+      const engine = new Server({
         transports: ["polling"],
         allowUpgrades: false,
         allowEIO3: true
@@ -2069,7 +2190,7 @@ describe("server", () => {
       engine.attach(srv);
       srv.listen(() => {
         const port = srv.address().port;
-        const socket = new eioc.Socket("https://localhost:%d".s(port), opts);
+        const socket = new ClientSocket(`https://localhost:${port}`, opts);
 
         engine.on("connection", conn => {
           conn.on("message", msg => {
@@ -2084,7 +2205,10 @@ describe("server", () => {
       });
     });
 
-    it("should send and receive data with ca when not requiring auth (polling)", done => {
+    it("should send and receive data with ca when not requiring auth (polling)", function(done) {
+      if (process.env.EIO_WS_ENGINE === "uws") {
+        return this.skip();
+      }
       const srvOpts = {
         key: fs.readFileSync("test/fixtures/server.key"),
         cert: fs.readFileSync("test/fixtures/server.crt"),
@@ -2103,7 +2227,7 @@ describe("server", () => {
         res.end("hello world\n");
       });
 
-      const engine = eio({
+      const engine = new Server({
         transports: ["polling"],
         allowUpgrades: false,
         allowEIO3: true
@@ -2111,7 +2235,7 @@ describe("server", () => {
       engine.attach(srv);
       srv.listen(() => {
         const port = srv.address().port;
-        const socket = new eioc.Socket("https://localhost:%d".s(port), opts);
+        const socket = new ClientSocket(`https://localhost:${port}`, opts);
 
         engine.on("connection", conn => {
           conn.on("message", msg => {
@@ -2126,7 +2250,10 @@ describe("server", () => {
       });
     });
 
-    it("should send and receive data with key and cert (ws)", done => {
+    it("should send and receive data with key and cert (ws)", function(done) {
+      if (process.env.EIO_WS_ENGINE === "uws") {
+        return this.skip();
+      }
       const srvOpts = {
         key: fs.readFileSync("test/fixtures/server.key"),
         cert: fs.readFileSync("test/fixtures/server.crt"),
@@ -2147,7 +2274,7 @@ describe("server", () => {
         res.end("hello world\n");
       });
 
-      const engine = eio({
+      const engine = new Server({
         transports: ["websocket"],
         allowUpgrades: false,
         allowEIO3: true
@@ -2155,7 +2282,7 @@ describe("server", () => {
       engine.attach(srv);
       srv.listen(() => {
         const port = srv.address().port;
-        const socket = new eioc.Socket("https://localhost:%d".s(port), opts);
+        const socket = new ClientSocket(`https://localhost:${port}`, opts);
 
         engine.on("connection", conn => {
           conn.on("message", msg => {
@@ -2170,7 +2297,10 @@ describe("server", () => {
       });
     });
 
-    it("should send and receive data with pfx (polling)", done => {
+    it("should send and receive data with pfx (polling)", function(done) {
+      if (process.env.EIO_WS_ENGINE === "uws") {
+        return this.skip();
+      }
       const srvOpts = {
         key: fs.readFileSync("test/fixtures/server.key"),
         cert: fs.readFileSync("test/fixtures/server.crt"),
@@ -2190,7 +2320,7 @@ describe("server", () => {
         res.end("hello world\n");
       });
 
-      const engine = eio({
+      const engine = new Server({
         transports: ["polling"],
         allowUpgrades: false,
         allowEIO3: true
@@ -2198,7 +2328,7 @@ describe("server", () => {
       engine.attach(srv);
       srv.listen(() => {
         const port = srv.address().port;
-        const socket = new eioc.Socket("https://localhost:%d".s(port), opts);
+        const socket = new ClientSocket(`https://localhost:${port}`, opts);
 
         engine.on("connection", conn => {
           conn.on("message", msg => {
@@ -2213,7 +2343,10 @@ describe("server", () => {
       });
     });
 
-    it("should send and receive data with pfx (ws)", done => {
+    it("should send and receive data with pfx (ws)", function(done) {
+      if (process.env.EIO_WS_ENGINE === "uws") {
+        return this.skip();
+      }
       const srvOpts = {
         key: fs.readFileSync("test/fixtures/server.key"),
         cert: fs.readFileSync("test/fixtures/server.crt"),
@@ -2233,7 +2366,7 @@ describe("server", () => {
         res.end("hello world\n");
       });
 
-      const engine = eio({
+      const engine = new Server({
         transports: ["websocket"],
         allowUpgrades: false,
         allowEIO3: true
@@ -2241,7 +2374,7 @@ describe("server", () => {
       engine.attach(srv);
       srv.listen(() => {
         const port = srv.address().port;
-        const socket = new eioc.Socket("https://localhost:%d".s(port), opts);
+        const socket = new ClientSocket(`https://localhost:${port}`, opts);
 
         engine.on("connection", conn => {
           conn.on("message", msg => {
@@ -2261,7 +2394,7 @@ describe("server", () => {
     describe("writeBuffer", () => {
       it("should not empty until `drain` event (polling)", done => {
         listen({ allowUpgrades: false }, port => {
-          const socket = new eioc.Socket("ws://localhost:%d".s(port), {
+          const socket = new ClientSocket(`ws://localhost:${port}`, {
             transports: ["polling"]
           });
           let totalEvents = 2;
@@ -2280,7 +2413,7 @@ describe("server", () => {
 
       it("should not empty until `drain` event (websocket)", done => {
         listen({ allowUpgrades: false }, port => {
-          const socket = new eioc.Socket("ws://localhost:%d".s(port), {
+          const socket = new ClientSocket(`ws://localhost:${port}`, {
             transports: ["websocket"]
           });
           let totalEvents = 2;
@@ -2301,7 +2434,7 @@ describe("server", () => {
     describe("callback", () => {
       it("should execute in order when message sent (client) (polling)", done => {
         const engine = listen({ allowUpgrades: false }, port => {
-          const socket = new eioc.Socket("ws://localhost:%d".s(port), {
+          const socket = new ClientSocket(`ws://localhost:${port}`, {
             transports: ["polling"]
           });
           let i = 0;
@@ -2340,7 +2473,7 @@ describe("server", () => {
 
       it("should execute in order when message sent (client) (websocket)", done => {
         const engine = listen({ allowUpgrades: false }, port => {
-          const socket = new eioc.Socket("ws://localhost:%d".s(port), {
+          const socket = new ClientSocket(`ws://localhost:${port}`, {
             transports: ["websocket"]
           });
           let i = 0;
@@ -2379,7 +2512,7 @@ describe("server", () => {
 
       it("should execute in order with payloads (client) (polling)", done => {
         const engine = listen({ allowUpgrades: false }, port => {
-          const socket = new eioc.Socket("ws://localhost:%d".s(port), {
+          const socket = new ClientSocket(`ws://localhost:${port}`, {
             transports: ["polling"]
           });
           let i = 0;
@@ -2424,7 +2557,7 @@ describe("server", () => {
 
       it("should execute in order with payloads (client) (websocket)", done => {
         const engine = listen({ allowUpgrades: false }, port => {
-          const socket = new eioc.Socket("ws://localhost:%d".s(port), {
+          const socket = new ClientSocket(`ws://localhost:${port}`, {
             transports: ["websocket"]
           });
           let i = 0;
@@ -2469,7 +2602,7 @@ describe("server", () => {
 
       it("should execute when message sent (polling)", done => {
         const engine = listen({ allowUpgrades: false }, port => {
-          const socket = new eioc.Socket("ws://localhost:%d".s(port), {
+          const socket = new ClientSocket(`ws://localhost:${port}`, {
             transports: ["polling"]
           });
           let i = 0;
@@ -2495,7 +2628,7 @@ describe("server", () => {
 
       it("should execute when message sent (websocket)", done => {
         const engine = listen({ allowUpgrades: false }, port => {
-          const socket = new eioc.Socket("ws://localhost:%d".s(port), {
+          const socket = new ClientSocket(`ws://localhost:${port}`, {
             transports: ["websocket"]
           });
           let i = 0;
@@ -2522,7 +2655,7 @@ describe("server", () => {
 
       it("should execute once for each send", done => {
         const engine = listen(port => {
-          const socket = new eioc.Socket("ws://localhost:%d".s(port));
+          const socket = new ClientSocket(`ws://localhost:${port}`);
           let a = 0;
           let b = 0;
           let c = 0;
@@ -2553,7 +2686,7 @@ describe("server", () => {
 
       it("should execute in multipart packet", done => {
         const engine = listen(port => {
-          const socket = new eioc.Socket("ws://localhost:%d".s(port));
+          const socket = new ClientSocket(`ws://localhost:${port}`);
           let i = 0;
           let j = 0;
 
@@ -2581,7 +2714,7 @@ describe("server", () => {
 
       it("should execute in multipart packet (polling)", done => {
         const engine = listen(port => {
-          const socket = new eioc.Socket("ws://localhost:%d".s(port), {
+          const socket = new ClientSocket(`ws://localhost:${port}`, {
             transports: ["polling"]
           });
           let i = 0;
@@ -2619,7 +2752,7 @@ describe("server", () => {
 
       it("should clean callback references when socket gets closed with pending callbacks", done => {
         const engine = listen({ allowUpgrades: false }, port => {
-          const socket = new eioc.Socket("ws://localhost:%d".s(port), {
+          const socket = new ClientSocket(`ws://localhost:${port}`, {
             transports: ["polling"]
           });
 
@@ -2648,7 +2781,7 @@ describe("server", () => {
 
       it("should not execute when it is not actually sent (polling)", done => {
         const engine = listen({ allowUpgrades: false }, port => {
-          const socket = new eioc.Socket("ws://localhost:%d".s(port), {
+          const socket = new ClientSocket(`ws://localhost:${port}`, {
             transports: ["polling"]
           });
 
@@ -2673,7 +2806,7 @@ describe("server", () => {
     describe("pre-encoded content", () => {
       it("should use the pre-encoded content", done => {
         engine = listen(port => {
-          client = new eioc.Socket("ws://localhost:%d".s(port), {
+          client = new ClientSocket(`ws://localhost:${port}`, {
             transports: ["websocket"]
           });
 
@@ -2695,7 +2828,7 @@ describe("server", () => {
   describe("packet", () => {
     it("should emit when socket receives packet", done => {
       const engine = listen({ allowUpgrades: false }, port => {
-        const socket = new eioc.Socket("ws://localhost:%d".s(port));
+        const socket = new ClientSocket(`ws://localhost:${port}`);
         engine.on("connection", conn => {
           conn.on("packet", packet => {
             expect(packet.type).to.be("message");
@@ -2711,7 +2844,7 @@ describe("server", () => {
 
     it("should emit when receives pong", done => {
       const engine = listen({ allowUpgrades: false, pingInterval: 4 }, port => {
-        eioc("ws://localhost:%d".s(port));
+        new ClientSocket(`ws://localhost:${port}`);
         engine.on("connection", conn => {
           conn.on("packet", packet => {
             conn.close();
@@ -2730,7 +2863,7 @@ describe("server", () => {
   describe("packetCreate", () => {
     it("should emit before socket send message", done => {
       const engine = listen({ allowUpgrades: false }, port => {
-        eioc("ws://localhost:%d".s(port));
+        new ClientSocket(`ws://localhost:${port}`);
         engine.on("connection", conn => {
           conn.on("packetCreate", packet => {
             expect(packet.type).to.be("message");
@@ -2744,7 +2877,7 @@ describe("server", () => {
 
     it("should emit before send pong", done => {
       const engine = listen({ allowUpgrades: false, pingInterval: 4 }, port => {
-        eioc("ws://localhost:%d".s(port));
+        new ClientSocket(`ws://localhost:${port}`);
         engine.on("connection", conn => {
           conn.on("packetCreate", packet => {
             conn.close();
@@ -2812,7 +2945,7 @@ describe("server", () => {
         });
 
         // client
-        var socket = new eioc.Socket("ws://localhost:%d".s(port));
+        var socket = new ClientSocket(`ws://localhost:${port}`);
         socket.on("open", () => {
           let lastSent = 0;
           let lastReceived = 0;
@@ -2855,8 +2988,10 @@ describe("server", () => {
         });
       });
 
-      // attach another engine to make sure it doesn't break upgrades
-      eio.attach(engine.httpServer, { path: "/foo" });
+      if (engine.httpServer) {
+        // attach another engine to make sure it doesn't break upgrades
+        attach(engine.httpServer, { path: "/foo" });
+      }
     });
   });
 
@@ -2877,14 +3012,14 @@ describe("server", () => {
         http.get(
           {
             port: port,
-            path: "/engine.io/default/?transport=polling"
+            path: "/engine.io/?transport=polling"
           },
           res => {
             const sid = getSidFromResponse(res);
             http.get(
               {
                 port: port,
-                path: "/engine.io/default/?transport=polling&sid=" + sid,
+                path: "/engine.io/?transport=polling&sid=" + sid,
                 headers: { "Accept-Encoding": "gzip, deflate" }
               },
               res => {
@@ -2912,14 +3047,14 @@ describe("server", () => {
         http.get(
           {
             port: port,
-            path: "/engine.io/default/?transport=polling"
+            path: "/engine.io/?transport=polling"
           },
           res => {
             const sid = getSidFromResponse(res);
             http.get(
               {
                 port: port,
-                path: "/engine.io/default/?transport=polling&sid=" + sid,
+                path: "/engine.io/?transport=polling&sid=" + sid,
                 headers: { "Accept-Encoding": "deflate" }
               },
               res => {
@@ -2953,14 +3088,14 @@ describe("server", () => {
           http.get(
             {
               port: port,
-              path: "/engine.io/default/?transport=polling"
+              path: "/engine.io/?transport=polling"
             },
             res => {
               const sid = getSidFromResponse(res);
               http.get(
                 {
                   port: port,
-                  path: "/engine.io/default/?transport=polling&sid=" + sid,
+                  path: "/engine.io/?transport=polling&sid=" + sid,
                   headers: { "Accept-Encoding": "gzip, deflate" }
                 },
                 res => {
@@ -2987,14 +3122,14 @@ describe("server", () => {
           http.get(
             {
               port: port,
-              path: "/engine.io/default/?transport=polling"
+              path: "/engine.io/?transport=polling"
             },
             res => {
               const sid = getSidFromResponse(res);
               http.get(
                 {
                   port: port,
-                  path: "/engine.io/default/?transport=polling&sid=" + sid,
+                  path: "/engine.io/?transport=polling&sid=" + sid,
                   headers: { "Accept-Encoding": "gzip, deflate" }
                 },
                 res => {
@@ -3019,14 +3154,14 @@ describe("server", () => {
         http.get(
           {
             port: port,
-            path: "/engine.io/default/?transport=polling"
+            path: "/engine.io/?transport=polling"
           },
           res => {
             const sid = getSidFromResponse(res);
             http.get(
               {
                 port: port,
-                path: "/engine.io/default/?transport=polling&sid=" + sid,
+                path: "/engine.io/?transport=polling&sid=" + sid,
                 headers: { "Accept-Encoding": "gzip, deflate" }
               },
               res => {
@@ -3050,14 +3185,14 @@ describe("server", () => {
         http.get(
           {
             port: port,
-            path: "/engine.io/default/?transport=polling"
+            path: "/engine.io/?transport=polling"
           },
           res => {
             const sid = getSidFromResponse(res);
             http.get(
               {
                 port: port,
-                path: "/engine.io/default/?transport=polling&sid=" + sid,
+                path: "/engine.io/?transport=polling&sid=" + sid,
                 headers: { "Accept-Encoding": "gzip, deflate" }
               },
               res => {
@@ -3072,7 +3207,10 @@ describe("server", () => {
   });
 
   describe("permessage-deflate", () => {
-    it("should set threshold", done => {
+    it("should set threshold", function(done) {
+      if (process.env.EIO_WS_ENGINE === "uws") {
+        return this.skip();
+      }
       const engine = listen(
         { transports: ["websocket"], perMessageDeflate: { threshold: 0 } },
         port => {
@@ -3092,12 +3230,17 @@ describe("server", () => {
             for (let i = 0; i < buf.length; i++) buf[i] = i % 0xff;
             conn.send(buf, { compress: true });
           });
-          eioc("http://localhost:%d".s(port), { transports: ["websocket"] });
+          new ClientSocket(`http://localhost:${port}`, {
+            transports: ["websocket"]
+          });
         }
       );
     });
 
-    it("should not compress when the byte size is below threshold", done => {
+    it("should not compress when the byte size is below threshold", function(done) {
+      if (process.env.EIO_WS_ENGINE === "uws") {
+        return this.skip();
+      }
       const engine = listen(
         { transports: ["websocket"], perMessageDeflate: true },
         port => {
@@ -3117,7 +3260,9 @@ describe("server", () => {
             for (let i = 0; i < buf.length; i++) buf[i] = i % 0xff;
             conn.send(buf, { compress: true });
           });
-          eioc("http://localhost:%d".s(port), { transports: ["websocket"] });
+          new ClientSocket(`http://localhost:${port}`, {
+            transports: ["websocket"]
+          });
         }
       );
     });
@@ -3134,7 +3279,7 @@ describe("server", () => {
 
     function testForTransport(transport, done) {
       const engine = listen(port => {
-        const socket = new eioc.Socket("ws://localhost:%d".s(port), {
+        const socket = new ClientSocket(`ws://localhost:${port}`, {
           extraHeaders: headers,
           transports: [transport]
         });
@@ -3168,7 +3313,7 @@ describe("server", () => {
           });
           conn.send("hi");
         });
-        eioc("ws://localhost:%d".s(port), {
+        new ClientSocket(`ws://localhost:${port}`, {
           extraHeaders: headers,
           transports: ["polling"]
         });
@@ -3203,7 +3348,7 @@ describe("server", () => {
         });
 
         request
-          .get("http://localhost:%d/engine.io/".s(port))
+          .get(`http://localhost:${port}/engine.io/`)
           .query({ transport: "polling" })
           .end((err, res) => {
             expect(err).to.be(null);
@@ -3212,10 +3357,10 @@ describe("server", () => {
             expect(res.headers["set-cookie"].length).to.be(2);
             expect(res.headers["set-cookie"][1]).to.be("mycookie=456");
 
-            const sid = JSON.parse(res.text.substring(4)).sid;
+            const sid = JSON.parse(res.text.substring(5)).sid;
 
             request
-              .post("http://localhost:%d/engine.io/".s(port))
+              .post(`http://localhost:${port}/engine.io/`)
               .query({ transport: "polling", sid })
               .send("1:6")
               .end((err, res) => {
@@ -3240,7 +3385,7 @@ describe("server", () => {
         });
 
         request
-          .get("http://localhost:%d/engine.io/".s(port))
+          .get(`http://localhost:${port}/engine.io/`)
           .query({ transport: "polling" })
           .end((err, res) => {
             expect(err).to.be(null);
@@ -3249,10 +3394,10 @@ describe("server", () => {
             expect(res.headers["set-cookie"].length).to.be(2);
             expect(res.headers["set-cookie"][1]).to.be("mycookie=456");
 
-            const sid = JSON.parse(res.text.substring(4)).sid;
+            const sid = JSON.parse(res.text.substring(5)).sid;
 
             request
-              .post("http://localhost:%d/engine.io/".s(port))
+              .post(`http://localhost:${port}/engine.io/`)
               .query({ transport: "polling", sid })
               .send("1:6")
               .end((err, res) => {
@@ -3267,8 +3412,11 @@ describe("server", () => {
     });
 
     it("should emit a 'initial_headers' event (websocket)", function(done) {
-      if (process.env.EIO_WS_ENGINE === "eiows") {
-        this.skip();
+      if (
+        process.env.EIO_WS_ENGINE === "eiows" ||
+        process.env.EIO_WS_ENGINE === "uws"
+      ) {
+        return this.skip();
       }
       const partialDone = createPartialDone(done, 2);
 
@@ -3280,7 +3428,7 @@ describe("server", () => {
           partialDone();
         });
 
-        client = eioc("ws://localhost:%d".s(port), {
+        client = new ClientSocket(`ws://localhost:${port}`, {
           transports: ["websocket"]
         });
 
@@ -3301,7 +3449,7 @@ describe("server", () => {
           partialDone();
         });
 
-        client = eioc("ws://localhost:%d".s(port));
+        client = new ClientSocket(`ws://localhost:${port}`);
 
         client.on("upgrade", () => {
           partialDone();
@@ -3310,8 +3458,11 @@ describe("server", () => {
     });
 
     it("should emit several 'headers' events per connection", function(done) {
-      if (process.env.EIO_WS_ENGINE === "eiows") {
-        this.skip();
+      if (
+        process.env.EIO_WS_ENGINE === "eiows" ||
+        process.env.EIO_WS_ENGINE === "uws"
+      ) {
+        return this.skip();
       }
       const partialDone = createPartialDone(done, 4);
 
@@ -3320,7 +3471,7 @@ describe("server", () => {
           partialDone();
         });
 
-        client = eioc("ws://localhost:%d".s(port));
+        client = new ClientSocket(`ws://localhost:${port}`);
 
         client.on("upgrade", () => {
           partialDone();
@@ -3335,7 +3486,7 @@ describe("server", () => {
         { cors: { origin: true, headers: ["my-header"], credentials: true } },
         port => {
           request
-            .options("http://localhost:%d/engine.io/default/".s(port))
+            .options(`http://localhost:${port}/engine.io/`)
             .set("Origin", "http://engine.io")
             .query({ transport: "polling" })
             .end((err, res) => {
@@ -3365,7 +3516,7 @@ describe("server", () => {
         { cors: { origin: true, headers: ["my-header"], credentials: true } },
         port => {
           request
-            .get("http://localhost:%d/engine.io/default/".s(port))
+            .get(`http://localhost:${port}/engine.io/`)
             .set("Origin", "http://engine.io")
             .query({ transport: "polling" })
             .end((err, res) => {
@@ -3399,7 +3550,7 @@ describe("server", () => {
         },
         port => {
           request
-            .options("http://localhost:%d/engine.io/default/".s(port))
+            .options(`http://localhost:${port}/engine.io/`)
             .set("Origin", "http://bad-domain.com")
             .query({ transport: "polling" })
             .end((err, res) => {
@@ -3433,7 +3584,7 @@ describe("server", () => {
         },
         port => {
           request
-            .options("http://localhost:%d/engine.io/default/".s(port))
+            .options(`http://localhost:${port}/engine.io/`)
             .set("Origin", "http://good-domain.com")
             .query({ transport: "polling" })
             .end((err, res) => {
@@ -3461,15 +3612,46 @@ describe("server", () => {
         }
       );
     });
+
+    it("should work with CORS enabled", done => {
+      engine = listen(
+        { cors: { origin: true, headers: ["my-header"], credentials: true } },
+        port => {
+          const client = new ClientSocket(`ws://localhost:${port}`, {
+            transports: ["polling"]
+          });
+          engine.on("connection", socket => {
+            socket.on("message", msg => {
+              expect(msg).to.be("hey");
+              socket.send("holà");
+            });
+          });
+          client.on("open", () => {
+            client.send("hey");
+          });
+          client.on("message", msg => {
+            expect(msg).to.be("holà");
+            client.close();
+            done();
+          });
+        }
+      );
+    });
   });
 
   describe("wsEngine option", () => {
+    before(function() {
+      if (process.env.EIO_WS_ENGINE === "uws") {
+        this.skip();
+      }
+    });
+
     it("should allow loading of other websocket server implementation like eiows", done => {
       const engine = listen(
         { allowUpgrades: false, wsEngine: require("eiows").Server },
         port => {
           expect(engine.ws instanceof require("eiows").Server).to.be.ok();
-          const socket = new eioc.Socket("ws://localhost:%d".s(port));
+          const socket = new ClientSocket(`ws://localhost:${port}`);
           engine.on("connection", conn => {
             conn.send("a");
           });
@@ -3487,9 +3669,17 @@ describe("server", () => {
   describe("remoteAddress", () => {
     it("should be defined (polling)", done => {
       const engine = listen({ transports: ["polling"] }, port => {
-        eioc("ws://localhost:%d".s(port), { transports: ["polling"] });
+        new ClientSocket(`ws://localhost:${port}`, {
+          transports: ["polling"]
+        });
         engine.on("connection", socket => {
-          expect(socket.remoteAddress).to.be("::ffff:127.0.0.1");
+          if (process.env.EIO_WS_ENGINE === "uws") {
+            expect(socket.remoteAddress).to.be(
+              "0000:0000:0000:0000:0000:ffff:7f00:0001"
+            );
+          } else {
+            expect(socket.remoteAddress).to.be("::ffff:127.0.0.1");
+          }
           done();
         });
       });
@@ -3497,9 +3687,17 @@ describe("server", () => {
 
     it("should be defined (ws)", done => {
       const engine = listen({ transports: ["websocket"] }, port => {
-        eioc("ws://localhost:%d".s(port), { transports: ["websocket"] });
+        new ClientSocket(`ws://localhost:${port}`, {
+          transports: ["websocket"]
+        });
         engine.on("connection", socket => {
-          expect(socket.remoteAddress).to.be("::ffff:127.0.0.1");
+          if (process.env.EIO_WS_ENGINE === "uws") {
+            expect(socket.remoteAddress).to.be(
+              "0000:0000:0000:0000:0000:ffff:7f00:0001"
+            );
+          } else {
+            expect(socket.remoteAddress).to.be("::ffff:127.0.0.1");
+          }
           done();
         });
       });
